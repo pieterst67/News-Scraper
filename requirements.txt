@@ -1,0 +1,7 @@
+feedparser == 6.0.11
+hdbscan == 0.8.40
+newspaper3k == 0.2.8
+openai == 1.99.3
+python-dotenv == 1.1.1
+scikit-learn == 1.7.1
+umap-learn == 0.5.8
