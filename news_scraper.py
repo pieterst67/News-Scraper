@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import os
+import importlib
 import sqlite3
 import smtplib
 import ssl
@@ -13,6 +14,7 @@ import datetime as dt
 from email.mime.text import MIMEText
 from email.utils import parsedate_to_datetime
 from collections import defaultdict
+from urllib.parse import urlparse
 
 import feedparser
 import numpy as np
@@ -30,36 +32,41 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 # --- CONFIGURATION ---
 DB_PATH = os.environ.get("DB_PATH", "news.db") # Use env var or default to local file
-FEEDS = [
-    "https://rss.nytimes.com/services/xml/rss/nyt/HomePage.xml",
-    "http://feeds.bbci.co.uk/news/rss.xml",
-    "https://www.independent.co.uk/news/world/rss",
-    "https://www.theguardian.com/europe/rss",
-    "https://feeds.npr.org/1004/rss.xml",
-    "https://www.politico.eu/feed/rss/",
-    "https://feeds.nos.nl/nosnieuwsalgemeen",
-    "https://www.nrc.nl/rss/",
-    "https://www.technologyreview.com/feed/",
-    "https://www.theverge.com/rss/index.xml",
-    "https://www.wired.com/feed/rss",
-    "https://techcrunch.com/feed/",
-    "https://feeds.arstechnica.com/arstechnica/index",
-    "https://www.rtvnof.nl/feed/",
-    "https://waldnet.nl/script/rss.php",
-#    "https://lc.nl/api/feed/rss",
-    "https://www.omropfryslan.nl/rss/nieuws.xml",
-]
+
+# Load FEEDS from environment variables
+FEEDS = [u for u in os.getenv("FEEDS", "").splitlines() if u]
+
+# Mmax words per digest (~200 wpm × 15 min = 3000)
 READ_LIMIT_WORDS = 3000
+
 # This is the new key parameter for the centroid pipeline.
 # Only articles with a cosine similarity > this value to a topic's center will be included.
 SIMILARITY_THRESHOLD = 0.75
+
+# Number of days to keep old articles and briefings in the database.
+DB_RETENTION_DAYS = 7
+
+# Build paywall map {registered_domain : scraper-callable}
+paywall_map = {}
+for item in os.getenv("PAYWALL_MAP", "").split(","):
+    item = item.strip()
+    if not item:
+        continue
+    domain, target = item.split("=")
+    module, func   = target.split(":")
+    paywall_map[domain] = getattr(importlib.import_module(module), func)
 
 # --- HELPER FUNCTIONS (from your script) ---
 def fetch_article(url: str) -> str:
     """Downloads and parses an article, returning its text."""
     try:
         art = Article(url)
-        art.download()
+        domain = urlparse(url).netloc
+        # pay-wall scraper present?
+        if domain in paywall_map:
+            art.set_html(paywall_map[domain](url))
+        else:
+            art.download()
         art.parse()
         return art.text or art.title
     except Exception as e:
@@ -106,6 +113,32 @@ def init_db():
         """)
         con.commit()
     logging.info(f"Database {DB_PATH} initialized.")
+
+def cleanup_database():
+    """Removes old records from the database to prevent it from growing indefinitely."""
+    logging.info(f"Cleaning up database records older than {DB_RETENTION_DAYS} days...")
+    cutoff_date = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=DB_RETENTION_DAYS)
+
+    with sqlite3.connect(DB_PATH) as con:
+        cursor = con.cursor()
+
+        # Clean up old articles
+        cursor.execute("DELETE FROM articles WHERE published_date < ?", (cutoff_date.isoformat(),))
+        articles_deleted = cursor.rowcount
+
+        # Clean up old briefings
+        cursor.execute("DELETE FROM briefings WHERE created_at < ?", (cutoff_date.isoformat(),))
+        briefings_deleted = cursor.rowcount
+
+        con.commit()
+
+        if articles_deleted > 0 or briefings_deleted > 0:
+            logging.info(f"Deleted {articles_deleted} old articles and {briefings_deleted} old briefings.")
+            logging.info("Reclaiming disk space...")
+            con.execute("VACUUM")
+            logging.info("Database cleanup complete.")
+        else:
+            logging.info("No old records to clean up.")
 
 def get_embedding(text: str) -> np.ndarray:
     """Generates a vector embedding for the given text."""
@@ -157,6 +190,7 @@ def collect_articles():
                     len_full_text = len(full_text)
                     if not full_text or len_full_text < 300: # Skip short/empty articles
                         logging.info(f"Article too short: {entry.title} with {len_full_text} characters. Skipping")
+                        print(full_text)
                         continue
 
                     # Be a good web citizen
@@ -408,7 +442,8 @@ def send_mail(html_body: str):
 def main():
     """Main function to run the full news digest pipeline."""
     init_db()
-#    collect_articles()
+    cleanup_database()
+    collect_articles()
     cluster_and_summarize()
     digest_html = build_digest()
     if digest_html:
