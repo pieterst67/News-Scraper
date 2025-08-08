@@ -1,24 +1,5 @@
 #!/usr/bin/env python3
-"""
-Dependencies
-------------
-pip install feedparser newspaper3k openai hdbscan scikit-learn python-dotenv umap-learn
 
-Environment variables (e.g. in .env)
-------------------------------------
-OPENAI_API_KEY=<your-key>
-SMTP_HOST=smtp.example.com
-SMTP_PORT=587
-SMTP_USER=user@example.com
-SMTP_PASS=<password>
-EMAIL_FROM=news-bot@example.com
-EMAIL_TO=user@example.com
-
-Config
-------
-FEEDS: list of RSS/Atom URLs
-READ_LIMIT_WORDS: max words per digest (~200 wpm × 15 min = 3000)
-"""
 import os
 import sqlite3
 import smtplib
