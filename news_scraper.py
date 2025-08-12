@@ -41,7 +41,7 @@ READ_LIMIT_WORDS = 3000
 
 # This is the new key parameter for the centroid pipeline.
 # Only articles with a cosine similarity > this value to a topic's center will be included.
-SIMILARITY_THRESHOLD = 0.75
+SIMILARITY_THRESHOLD = 0.73
 
 # Number of days to keep old articles and briefings in the database.
 DB_RETENTION_DAYS = 7
@@ -384,7 +384,8 @@ def build_digest() -> str:
             if sources:
                 # Create a list of clickable links using the source_name, URL, and Title
                 source_items = "".join([f"<li>{html.escape(s.get('source_name', ''))}, <a href='{html.escape(s['url'])}'>{html.escape(s['title'])}</a></li>" for s in sources])
-                block.append(f'<p><em>Sources:</em><ul>{source_items}</ul></p>')
+#                block.append(f'<p><em>Sources:</em><ul>{source_items}</ul></p>')
+                block.append(f'<details><summary><em>Sources</em></summary><p><ul>{source_items}</ul></p></details>')
         except (json.JSONDecodeError, TypeError, KeyError):
             pass # Ignore if sources can't be parsed
 
