@@ -399,7 +399,7 @@ def build_digest() -> str:
 
     html_body = (
         "<html><body style='line-height: 1.6;'>"
-        f"<h2>Daily Digest — {dt.datetime.now():%Y-%m-%d}</h2>"
+        f"<h2>Dagelijks Nieuwsoverzicht - {dt.datetime.now():%A, %d %B %Y}</h2>"
         + "\n".join(digest_parts) +
         "</body></html>"
     )
@@ -414,7 +414,7 @@ def send_mail(html_body: str):
 
     logging.info(f"Sending digest to {os.environ['EMAIL_TO']}...")
     msg = MIMEText(html_body, "html", "utf-8")
-    msg["Subject"] = "Dagelijks nieuwsoverzicht - " + dt.datetime.now().strftime("%A, %d %B %Y")
+    msg["Subject"] = "Dagelijks Nieuwsoverzicht - " + dt.datetime.now().strftime("%A, %d %B %Y")
     msg["From"] = os.environ["EMAIL_FROM"]
     msg["To"] = os.environ["EMAIL_TO"]
     msg["CC"] = os.environ["EMAIL_CC"]
