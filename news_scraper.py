@@ -10,6 +10,7 @@ import html
 import time
 import random
 import logging
+import locale
 import datetime as dt
 from email.mime.text import MIMEText
 from email.utils import parsedate_to_datetime
@@ -29,6 +30,7 @@ from dotenv import load_dotenv
 load_dotenv()  # Optional .env support
 client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+locale.setlocale(locale.LC_TIME, "nl_NL.UTF-8")
 
 # --- CONFIGURATION ---
 DB_PATH = os.environ.get("DB_PATH", "news.db") # Use env var or default to local file
