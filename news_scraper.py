@@ -384,8 +384,7 @@ def build_digest() -> str:
             if sources:
                 # Create a list of clickable links using the source_name, URL, and Title
                 source_items = "".join([f"<li>{html.escape(s.get('source_name', ''))}, <a href='{html.escape(s['url'])}'>{html.escape(s['title'])}</a></li>" for s in sources])
-#                block.append(f'<p><em>Sources:</em><ul>{source_items}</ul></p>')
-                block.append(f'<details><summary><em>Sources</em></summary><p><ul>{source_items}</ul></p></details>')
+                block.append(f"<details><summary><em>Bronnen</em></summary><p><ul>{source_items}</ul></p></details>")
         except (json.JSONDecodeError, TypeError, KeyError):
             pass # Ignore if sources can't be parsed
 
@@ -413,7 +412,7 @@ def send_mail(html_body: str):
 
     logging.info(f"Sending digest to {os.environ['EMAIL_TO']}...")
     msg = MIMEText(html_body, "html", "utf-8")
-    msg["Subject"] = "Your News Digest for " + dt.datetime.now().strftime("%A, %d %B %Y")
+    msg["Subject"] = "Dagelijks nieuwsoverzicht - " + dt.datetime.now().strftime("%A, %d %B %Y")
     msg["From"] = os.environ["EMAIL_FROM"]
     msg["To"] = os.environ["EMAIL_TO"]
     msg["CC"] = os.environ["EMAIL_CC"]
