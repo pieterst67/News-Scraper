@@ -45,6 +45,9 @@ READ_LIMIT_WORDS = 3000
 # Only articles with a cosine similarity > this value to a topic's center will be included.
 SIMILARITY_THRESHOLD = 0.73
 
+# Threshold to consider a new cluster an update to an old one
+CONTINUING_STORY_THRESHOLD = 0.80
+
 # Number of days to keep old articles and briefings in the database.
 DB_RETENTION_DAYS = 7
 
@@ -110,6 +113,7 @@ def init_db():
                 summary_content TEXT,
                 source_articles TEXT,
                 importance_score INTEGER DEFAULT 0,
+                embedding BLOB,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
@@ -218,7 +222,8 @@ def collect_articles():
 
 
 def cluster_and_summarize():
-    """Clusters articles using a two-pass Centroid-Based Re-clustering pipeline."""
+    """Clusters articles using a two-pass Centroid-Based Re-clustering pipeline,
+       with memory of past briefings."""
     logging.info("Starting Centroid Re-clustering and summarization phase...")
     with sqlite3.connect(DB_PATH) as con:
         con.row_factory = sqlite3.Row
@@ -238,6 +243,12 @@ def cluster_and_summarize():
         # Store URL and source_name in the articles_map
         articles_map = {row['id']: {'title': row['title'], 'source_name': row['source_name'], 'full_text': row['full_text'], 'url': row['url']} for row in rows}
         embeddings = np.array([np.frombuffer(row['embedding'], dtype=np.float32) for row in rows])
+
+        # --- Find Previous Briefings for Context ---
+        cutoff_date = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=3)
+        cursor.execute("SELECT id, summary_content, embedding FROM briefings WHERE created_at > ?", (cutoff_date.isoformat(),))
+        past_briefings = [{'id': r['id'], 'summary': r['summary_content'], 'embedding': np.frombuffer(r['embedding'], dtype=np.float32)} for r in cursor.fetchall() if r['embedding']]
+        past_briefing_embeddings = np.array([b['embedding'] for b in past_briefings]) if past_briefings else np.array([])
 
         # --- CENTROID-BASED RE-CLUSTERING PIPELINE ---
 
@@ -285,6 +296,17 @@ def cluster_and_summarize():
                 logging.info(f"Pure cluster {cluster_id} is too small with {len(cluster_indices)} article(s). Skipping.")
                 continue
 
+            current_centroid = centroids[cluster_id]
+
+            # --- Check for Continuing Story ---
+            previous_summary = None
+            if past_briefing_embeddings.size > 0:
+                story_similarities = np.dot(past_briefing_embeddings, current_centroid.T)
+                most_similar_past_briefing_idx = np.argmax(story_similarities)
+                if story_similarities[most_similar_past_briefing_idx] >= CONTINUING_STORY_THRESHOLD:
+                    previous_summary = past_briefings[most_similar_past_briefing_idx]['summary']
+                    logging.info(f"Found continuing story for cluster {cluster_id}.")
+
             combined_text = ""
             source_info = [] # Store dicts of {'title': ..., 'url': ..., 'source_name': ...}
             for idx in cluster_indices:
@@ -292,8 +314,8 @@ def cluster_and_summarize():
                 article_data = articles_map[article_id]
                 combined_text += f"Article Title: {article_data['title']}\n\n{article_data['full_text']}\n\n---\n\n"
                 source_info.append({
-                    'title': article_data['title'], 
-                    'url': article_data['url'], 
+                    'title': article_data['title'],
+                    'url': article_data['url'],
                     'source_name': article_data['source_name']
                 })
 
@@ -302,43 +324,52 @@ def cluster_and_summarize():
             logging.info(f"Summarizing pure cluster {cluster_id} with {len(cluster_indices)} articles...")
             try:
                 system_prompt = (
-                    "Je bent een redacteur. Antwoord uitsluitend in het Nederlands (NL). "
-                    "Stijl: neutraal, objectief (ANP/Reuters). "
-                    "Voor verzending: controleer of de volledige uitvoer 100% Nederlands is; "
-                    "zo niet, herschrijf de uitvoer volledig naar Nederlands."
+                    "You are a world-class news analyst. Your task is to synthesize news articles into a sharp, concise briefing. "
+                    "Output MUST be entirely in correct Dutch. After composing, check if the text is fully in Dutch; "
+                    "if not, rewrite it entirely in correct Dutch. "
+                    "Maintain a neutral, objective, fact-based tone similar to ANP or Reuters. "
+                    "Do not include opinions, conclusions, observations, speculation, or value judgments. "
+                    "Respond ONLY with a valid JSON object, using exactly these keys: "
+                    "'title' (string), 'summary' (string), 'importance' (integer from 1 = minor news to 10 = major global event). "
+                    "Do not add any extra commentary before or after the JSON object."
                 )
 
-                summary_prompt = (
-                    "Vat de volgende nieuwsartikelen samen tot één feitelijk nieuwsbericht. "
-                    "Gebruik een neutrale, objectieve toon zoals ANP of Reuters. "
-                    "Neem uitsluitend verifieerbare feiten (data, plaatsen, personen) op. "
-                    "GEEN meningen, interpretaties, conclusies, speculatie of waardeoordelen. "
-                    "Maak één coherent, feitelijk narratief.\n\n"
-                    f"ARTIKELEN:\n{combined_text[:100000]}\n\n"
-                    "Reageer UITSLUITEND met een JSON-object met drie sleutels: "
-                    "'title', 'summary' en 'importance'. "
-                    "'importance' is een geheel getal van 1 (klein/niche) tot 10 (groot wereldwijd)."
-                )
+                if previous_summary:
+                    user_prompt = (
+                        "Update the briefing for a developing story, focusing only on new developments compared to yesterday.\n\n"
+                        f"YESTERDAY'S SUMMARY:\n{previous_summary}\n\n"
+                        f"TODAY'S NEW ARTICLES:\n{combined_text[:90000]}\n\n"
+                        "Produce an updated JSON object with 'title', 'summary', and 'importance'."
+                    )
+                else:
+                    user_prompt = (
+                        "Synthesize the following news articles into one compelling briefing.\n\n"
+                        f"ARTICLES:\n{combined_text[:100000]}\n\n"
+                        "Return a JSON object with 'title', 'summary', and 'importance'."
+                    )
 
                 response = client.chat.completions.create(
                     model="gpt-4o",
-                    response_format={"type": "json_object"},
+                    seed=42,               # Ensures reproducible results for identical inputs
                     messages=[
                         {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": summary_prompt},
+                        {"role": "user", "content": user_prompt}
                     ],
-                    temperature=0.1,
-                    seed=42,
-                    max_tokens=800,
+                    temperature=0,         # Deterministic, no creative drift
+                    max_tokens=800,        # Enough for detailed summary without overflow
+                    top_p=1,               # Keep selection deterministic with temp=0
+                    frequency_penalty=0,   # Allow repetition if factual
+                    presence_penalty=0,     # Avoid pushing new, non-factual content
+                    response_format={"type": "json_object"}  # Enforce strict JSON output
                 )
                 data = json.loads(response.choices[0].message.content)
-                summary_title = data.get("title", "Untitled Briefing")
+                summary_title = data.get("title", "Untitled Briefing") + (" (Update)" if previous_summary else "")
                 summary_content = data.get("summary", "No summary available.")
                 importance_score = data.get("importance", 5)
 
                 cursor.execute(
-                    "INSERT INTO briefings (summary_title, summary_content, source_articles, importance_score) VALUES (?, ?, ?, ?)",
-                    (summary_title, summary_content, json.dumps(source_info), importance_score)
+                    "INSERT INTO briefings (summary_title, summary_content, source_articles, importance_score, embedding) VALUES (?, ?, ?, ?, ?)",
+                    (summary_title, summary_content, json.dumps(source_info), importance_score, current_centroid.tobytes())
                 )
                 logging.info(f"Saved briefing: {summary_title} (Importance: {importance_score})")
 
@@ -439,7 +470,6 @@ def send_mail(html_body: str):
 
     except Exception as e:
         logging.error(f"Failed to send email: {e}")
-
 
 def main():
     """Main function to run the full news digest pipeline."""
