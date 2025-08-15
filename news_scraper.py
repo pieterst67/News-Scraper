@@ -43,7 +43,7 @@ READ_LIMIT_WORDS = 3000
 
 # This is the new key parameter for the centroid pipeline.
 # Only articles with a cosine similarity > this value to a topic's center will be included.
-SIMILARITY_THRESHOLD = 0.73
+SIMILARITY_THRESHOLD = 0.85
 
 # Threshold to consider a new cluster an update to an old one
 CONTINUING_STORY_THRESHOLD = 0.80
@@ -133,7 +133,7 @@ def cleanup_database():
         articles_deleted = cursor.rowcount
 
         # Clean up old briefings
-        cursor.execute("DELETE FROM briefings WHERE created_at < ?", (cutoff_date.isoformat(),))
+        cursor.execute("DELETE FROM briefings WHERE created_at < ? AND sent_in_digest = 1", (cutoff_date.isoformat(),))
         briefings_deleted = cursor.rowcount
 
         con.commit()
@@ -196,7 +196,6 @@ def collect_articles():
                     len_full_text = len(full_text)
                     if not full_text or len_full_text < 300: # Skip short/empty articles
                         logging.info(f"Article too short: {entry.title} with {len_full_text} characters. Skipping")
-                        print(full_text)
                         continue
 
                     # Be a good web citizen
@@ -258,8 +257,11 @@ def cluster_and_summarize():
 
         # 2. Perform a loose, initial clustering to discover potential topics.
         initial_clusters = hdbscan.HDBSCAN(
-            min_cluster_size=5, min_samples=5, metric='euclidean', cluster_selection_method='eom'
-        ).fit_predict(umap.UMAP(n_neighbors=15, n_components=10, random_state=42).fit_transform(normalized_embeddings))
+            min_cluster_size=5,
+            min_samples=3,
+            metric="euclidean",
+            cluster_selection_method="leaf",
+        ).fit_predict(normalized_embeddings)
         logging.info(f"Found {len(set(initial_clusters)) - 1} initial topic groups.")
 
         # 3. Calculate the centroid for each initial topic cluster.
@@ -387,19 +389,19 @@ def build_digest() -> str:
     """Builds an HTML digest from the latest generated briefings."""
     logging.info("Building HTML digest...")
     with sqlite3.connect(DB_PATH) as con:
-        # Fetch briefings created in the last 24 hours
-        cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=24)
+        # Select all briefings that have not been sent yet
         rows = con.execute(
-            "SELECT importance_score, summary_title, summary_content, source_articles FROM briefings WHERE created_at > ? ORDER BY importance_score DESC",
-            (cutoff.isoformat(),)
+            "SELECT id, summary_title, summary_content, source_articles FROM briefings WHERE sent_in_digest = 0 ORDER BY importance_score DESC"
         ).fetchall()
 
     if not rows:
         logging.info("No new briefings to build a digest.")
-        return ""
+        return "", []
 
+    briefing_ids = [row[0] for row in rows]
     digest_parts, words = [], 0
-    for score, title, content, sources_str in rows:
+    for row in rows:
+        _, title, content, sources_str = row
         word_count = len(content.split())
         if words + word_count > READ_LIMIT_WORDS:
             break
@@ -425,8 +427,7 @@ def build_digest() -> str:
         digest_parts.append("\n".join(block))
         words += word_count
 
-    if not digest_parts:
-        return ""
+    if not digest_parts: return "", []
 
     html_body = (
         "<html><body style='line-height: 1.6;'>"
@@ -434,8 +435,17 @@ def build_digest() -> str:
         + "\n".join(digest_parts) +
         "</body></html>"
     )
-    return html_body
+    return html_body, briefing_ids
 
+def mark_briefings_as_sent(briefing_ids: list[int]):
+    """Updates the database to mark a list of briefings as sent."""
+    if not briefing_ids:
+        return
+    logging.info(f"Marking {len(briefing_ids)} briefings as sent...")
+    with sqlite3.connect(DB_PATH) as con:
+        con.executemany("UPDATE briefings SET sent_in_digest = 1 WHERE id = ?", [(id,) for id in briefing_ids])
+        con.commit()
+    logging.info("Briefings marked as sent.")
 
 def send_mail(html_body: str):
     """Sends the HTML digest via email."""
@@ -477,11 +487,12 @@ def main():
     cleanup_database()
     collect_articles()
     cluster_and_summarize()
-    digest_html = build_digest()
+    digest_html, briefing_ids = build_digest()
     if digest_html:
         # For debugging, you can print the HTML
 #        print(digest_html)
         send_mail(digest_html)
+        mark_briefings_as_sent(briefing_ids)
     else:
         logging.info("No new digest was generated.")
 
