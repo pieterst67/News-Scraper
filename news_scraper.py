@@ -20,11 +20,11 @@ from urllib.parse import urlparse
 import feedparser
 import numpy as np
 import hdbscan
-import umap
 from sklearn.preprocessing import normalize
 from newspaper import Article
 from openai import OpenAI
 from dotenv import load_dotenv
+from embeddings_utils import embed_article
 
 # --- INITIALIZATION ---
 load_dotenv()  # Optional .env support
@@ -146,18 +146,6 @@ def cleanup_database():
         else:
             logging.info("No old records to clean up.")
 
-def get_embedding(text: str) -> np.ndarray:
-    """Generates a vector embedding for the given text."""
-    try:
-        text = text.replace("\n", " ").strip()
-        if not text:
-            return None
-        resp = client.embeddings.create(model="text-embedding-3-small", input=[text])
-        return np.array(resp.data[0].embedding, dtype=np.float32)
-    except Exception as e:
-        logging.error(f"OpenAI embedding call failed: {e}")
-        return None
-
 def collect_articles():
     """Scrapes RSS feeds for new articles and stores them with their embeddings."""
     logging.info("Starting article collection phase...")
@@ -201,10 +189,29 @@ def collect_articles():
                     # Be a good web citizen
                     time.sleep(random.uniform(2.0, 5.0))
 
-                    # 4. Generate embedding
-                    embedding_vec = get_embedding(full_text[:4000]) # Embed first 4000 chars
-                    if embedding_vec is None:
+                    # 4. Generate token-aware chunked, nomalized embedding
+                    try:
+                        res = embed_article(entry.title, full_text, model="text-embedding-3-small")
+                    except Exception as e:
+                        logging.error("Embedding failed: %s", e)
                         continue
+
+                    embedding_vec = res.get("doc_vector")
+
+                    if not isinstance(embedding_vec, np.ndarray) or embedding_vec.ndim != 1 or embedding_vec.size == 0:
+                        logging.error("Invalid embedding: missing/shape")
+                        continue
+                    if not np.isfinite(embedding_vec).all():
+                        logging.error("Invalid embedding: non-finite values")
+                        continue
+                    n = np.linalg.norm(embedding_vec)
+                    if not (0.9 <= n <= 1.1):
+                        logging.error("Invalid embedding: bad norm %.3f", n)
+                        continue
+
+                    # warn if a fallback path was used
+                    if res.get("used_fallback"):
+                        logging.warning("Embedding fallback used (%s)", res.get("fallback_reason"))
 
                     # 5. Store in database
                     cursor.execute(
@@ -241,7 +248,7 @@ def cluster_and_summarize():
         article_ids = [row['id'] for row in rows]
         # Store URL and source_name in the articles_map
         articles_map = {row['id']: {'title': row['title'], 'source_name': row['source_name'], 'full_text': row['full_text'], 'url': row['url']} for row in rows}
-        embeddings = np.array([np.frombuffer(row['embedding'], dtype=np.float32) for row in rows])
+        normalized_embeddings = np.array([np.frombuffer(row['embedding'], dtype=np.float32) for row in rows])
 
         # --- Find Previous Briefings for Context ---
         cutoff_date = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=3)
@@ -251,11 +258,7 @@ def cluster_and_summarize():
 
         # --- CENTROID-BASED RE-CLUSTERING PIPELINE ---
 
-        # 1. Normalize embeddings to focus on semantic direction
-        normalized_embeddings = normalize(embeddings, norm='l2')
-        logging.info("Embeddings normalized.")
-
-        # 2. Perform a loose, initial clustering to discover potential topics.
+        # 1. Perform a loose, initial clustering to discover potential topics.
         initial_clusters = hdbscan.HDBSCAN(
             min_cluster_size=5,
             min_samples=3,
@@ -264,7 +267,7 @@ def cluster_and_summarize():
         ).fit_predict(normalized_embeddings)
         logging.info(f"Found {len(set(initial_clusters)) - 1} initial topic groups.")
 
-        # 3. Calculate the centroid for each initial topic cluster.
+        # 2. Calculate the centroid for each initial topic cluster.
         centroids = []
         for cluster_id in set(initial_clusters):
             if cluster_id == -1: continue
@@ -278,7 +281,7 @@ def cluster_and_summarize():
             return
         logging.info(f"Calculated {len(centroids)} topic centroids.")
 
-        # 4. Re-cluster based on similarity to centroids.
+        # 3. Re-cluster based on similarity to centroids.
         final_clusters = defaultdict(list)
         # Cosine similarity for normalized vectors is just the dot product.
         similarities = np.dot(normalized_embeddings, np.array(centroids).T)
@@ -292,7 +295,7 @@ def cluster_and_summarize():
 
         logging.info(f"Formed {len(final_clusters)} pure clusters after similarity filtering.")
 
-        # 5. Summarize the final, pure clusters
+        # 4. Summarize the final, pure clusters
         for cluster_id, cluster_indices in final_clusters.items():
             if len(cluster_indices) < 3: # Don't summarize very small clusters
                 logging.info(f"Pure cluster {cluster_id} is too small with {len(cluster_indices)} article(s). Skipping.")
