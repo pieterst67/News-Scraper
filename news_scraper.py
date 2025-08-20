@@ -62,7 +62,7 @@ for item in os.getenv("PAYWALL_MAP", "").split(","):
     paywall_map[domain] = getattr(importlib.import_module(module), func)
 
 # --- HELPER FUNCTIONS (from your script) ---
-def fetch_article(url: str) -> str:
+def fetch_article(url: str) -> tuple[str, str]:
     """Downloads and parses an article, returning its text."""
     try:
         art = Article(url)
@@ -73,10 +73,10 @@ def fetch_article(url: str) -> str:
         else:
             art.download()
         art.parse()
-        return art.text or art.title
+        return art.text or art.title, art.top_image
     except Exception as e:
         logging.warning(f"Could not download or parse article at {url}: {e}")
-        return ""
+        return "", ""
 
 def _as_datetime(pub: str) -> dt.datetime:
     """Converts a string to a timezone-aware datetime object."""
@@ -100,6 +100,7 @@ def init_db():
                 url TEXT UNIQUE,
                 title TEXT,
                 full_text TEXT,
+                image TEXT,
                 published_date TIMESTAMP,
                 embedding BLOB,
                 processed_for_digest BOOLEAN DEFAULT 0
@@ -111,10 +112,12 @@ def init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 summary_title TEXT,
                 summary_content TEXT,
+                summary_image TEXT,
                 source_articles TEXT,
                 importance_score INTEGER DEFAULT 0,
                 embedding BLOB,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                sent_in_digest BOOLEAN DEFAULT 0
             )
         """)
         con.commit()
@@ -179,8 +182,8 @@ def collect_articles():
                         logging.warning(f"Could not parse date for article: {entry.title}. Skipping.")
                         continue
 
-                    # 3. Fetch full text
-                    full_text = fetch_article(url)
+                    # 3. Fetch full text and top image
+                    full_text, image = fetch_article(url)
                     len_full_text = len(full_text)
                     if not full_text or len_full_text < 300: # Skip short/empty articles
                         logging.info(f"Article too short: {entry.title} with {len_full_text} characters. Skipping")
@@ -215,9 +218,9 @@ def collect_articles():
 
                     # 5. Store in database
                     cursor.execute(
-                        """INSERT INTO articles (source_name, url, title, full_text, published_date, embedding)
-                           VALUES (?, ?, ?, ?, ?, ?)""",
-                        (source_name, url, entry.title, full_text, pub_dt.isoformat(), embedding_vec.tobytes())
+                        """INSERT INTO articles (source_name, url, title, full_text, image, published_date, embedding)
+                           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                        (source_name, url, entry.title, full_text, image, pub_dt.isoformat(), embedding_vec.tobytes())
                     )
                     logging.info(f"Stored article from {source_name}: {entry.title}")
 
@@ -236,7 +239,7 @@ def cluster_and_summarize():
         cursor = con.cursor()
 
         # Fetch all unprocessed articles, now including the source_name and URL
-        cursor.execute("SELECT id, title, source_name, full_text, embedding, url FROM articles WHERE processed_for_digest = 0")
+        cursor.execute("SELECT id, title, source_name, full_text, image, embedding, url FROM articles WHERE processed_for_digest = 0")
         rows = cursor.fetchall()
 
         if len(rows) < 20:
@@ -247,7 +250,7 @@ def cluster_and_summarize():
 
         article_ids = [row['id'] for row in rows]
         # Store URL and source_name in the articles_map
-        articles_map = {row['id']: {'title': row['title'], 'source_name': row['source_name'], 'full_text': row['full_text'], 'url': row['url']} for row in rows}
+        articles_map = {row['id']: {'title': row['title'], 'source_name': row['source_name'], 'full_text': row['full_text'], 'image': row['image'], 'url': row['url']} for row in rows}
         normalized_embeddings = np.array([np.frombuffer(row['embedding'], dtype=np.float32) for row in rows])
 
         # --- Find Previous Briefings for Context ---
@@ -313,11 +316,14 @@ def cluster_and_summarize():
                     logging.info(f"Found continuing story for cluster {cluster_id}.")
 
             combined_text = ""
+            summary_image = ""
             source_info = [] # Store dicts of {'title': ..., 'url': ..., 'source_name': ...}
             for idx in cluster_indices:
                 article_id = article_ids[idx]
                 article_data = articles_map[article_id]
                 combined_text += f"Article Title: {article_data['title']}\n\n{article_data['full_text']}\n\n---\n\n"
+                if summary_image == "":
+                    summary_image = article_data['image']
                 source_info.append({
                     'title': article_data['title'],
                     'url': article_data['url'],
@@ -373,8 +379,8 @@ def cluster_and_summarize():
                 importance_score = data.get("importance", 5)
 
                 cursor.execute(
-                    "INSERT INTO briefings (summary_title, summary_content, source_articles, importance_score, embedding) VALUES (?, ?, ?, ?, ?)",
-                    (summary_title, summary_content, json.dumps(source_info), importance_score, current_centroid.tobytes())
+                    "INSERT INTO briefings (summary_title, summary_content, summary_image, source_articles, importance_score, embedding) VALUES (?, ?, ?, ?, ?, ?)",
+                    (summary_title, summary_content, summary_image, json.dumps(source_info), importance_score, current_centroid.tobytes())
                 )
                 logging.info(f"Saved briefing: {summary_title} (Importance: {importance_score})")
 
@@ -394,7 +400,7 @@ def build_digest() -> str:
     with sqlite3.connect(DB_PATH) as con:
         # Select all briefings that have not been sent yet
         rows = con.execute(
-            "SELECT id, summary_title, summary_content, source_articles FROM briefings WHERE sent_in_digest = 0 ORDER BY importance_score DESC"
+            "SELECT id, summary_title, summary_content, summary_image, source_articles FROM briefings WHERE sent_in_digest = 0 ORDER BY importance_score DESC"
         ).fetchall()
 
     if not rows:
@@ -404,18 +410,22 @@ def build_digest() -> str:
     briefing_ids = [row[0] for row in rows]
     digest_parts, words = [], 0
     for row in rows:
-        _, title, content, sources_str = row
+        _, title, content, image, sources_str = row
         word_count = len(content.split())
         if words + word_count > READ_LIMIT_WORDS:
             break
 
         e_title = html.escape(title)
+        e_image = html.escape(image)
         e_content = html.escape(content).replace("\n", "<br>")
 
         block = [
             f'<h3>{e_title}</h3>',
             f"<p>{e_content}</p>",
         ]
+
+        if e_image:
+            block.insert(1, f"<img src=\"{e_image}\" style=\"max-width:100%; height:auto;\" alt=\"Image\">")
 
         try:
             sources = json.loads(sources_str)
@@ -434,7 +444,7 @@ def build_digest() -> str:
 
     html_body = (
         "<html><body style='line-height: 1.6;'>"
-        f"<h2>Dagelijks Nieuwsoverzicht - {dt.datetime.now():%A, %d %B %Y}</h2>"
+        f"<h2>Dit is het dagelijks nieuwsoverzicht van {dt.datetime.now():%A %d %B %Y}</h2>"
         + "\n".join(digest_parts) +
         "</body></html>"
     )
