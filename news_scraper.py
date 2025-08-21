@@ -421,11 +421,11 @@ def build_digest() -> str:
 
         block = [
             f'<h3>{e_title}</h3>',
-            f"<p>{e_content}</p>",
+            f"<p style=\"margin:0; padding:0;\">{e_content}</p>",
         ]
 
         if e_image:
-            block.insert(1, f"<img src=\"{e_image}\" style=\"max-width:100%; height:auto;\" alt=\"Image\">")
+            block.insert(0, f"<img src=\"{e_image}\" style=\"display:block; max-width:100%; height:auto; border:0; margin:0; padding:0;\" alt=\"Image\">")
 
         try:
             sources = json.loads(sources_str)
@@ -436,16 +436,23 @@ def build_digest() -> str:
         except (json.JSONDecodeError, TypeError, KeyError):
             pass # Ignore if sources can't be parsed
 
-        block.append("<hr>")
+        block.append("<br>")
+
         digest_parts.append("\n".join(block))
         words += word_count
 
     if not digest_parts: return "", []
 
     html_body = (
-        "<html><body style='line-height: 1.6;'>"
-        f"<h2>Dit is het dagelijks nieuwsoverzicht van {dt.datetime.now():%A %d %B %Y}</h2>"
+        "<html><body style=\"margin:0; padding:0;\">"
+        "<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\">"
+        "<tr>"
+        "<td style=\"padding:16px; font-size:16px; line-height:1.5;\">"
+        f"<h2 style=\"margin:0 0 16px 0; padding:0; font-size:20px; line-height:1.3; font-weight:bold;\">Dit is het nieuwsoverzicht van {dt.datetime.now():%A %d %B %Y}</h2>"
         + "\n".join(digest_parts) +
+        "</td>"
+        "</tr>"
+        "</table>"
         "</body></html>"
     )
     return html_body, briefing_ids
