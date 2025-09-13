@@ -59,6 +59,30 @@ def needs_browser(url: str) -> bool:
     doms = {norm(d) for d in os.getenv("BROWSER_DOMAINS", "").replace(",", " ").split() if d}
     return any(host == d or host.endswith("." + d) for d in doms)
 
+def fetch_article_with_retry(url: str, consecutive_failures: int) -> tuple[str, str]:
+    max_retries = 5
+    backoff_base = 30  # Initial backoff delay in seconds
+
+    for attempt in range(max_retries):
+        text, image = fetch_article(url)
+        if text:
+            return text, image
+
+        consecutive_failures += 1
+
+        # Compute wait time with full jitter, cap at 15 minutes
+        backoff_delay = min(random.uniform(0, backoff_base * (2 ** attempt)), 900)
+        if consecutive_failures >= 3:
+            cooloff = random.uniform(300, 600)
+            backoff_delay = max(backoff_delay, cooloff)
+            logging.warning(f"Cooling off for {round(backoff_delay, 1)} seconds...")
+        else:
+            logging.warning(f"Retrying in {round(backoff_delay, 1)} seconds...")
+        time.sleep(backoff_delay)
+
+    logging.error(f"All {max_retries} attempts failed for URL: {url}")
+    return "", ""
+
 def fetch_article(url: str) -> tuple[str, str]:
     try:
         env = {
@@ -68,6 +92,7 @@ def fetch_article(url: str) -> tuple[str, str]:
 
         timeout = 60
 
+        logging.info(f"Fetching {url}")
         # pay-wall?
         if needs_browser(url):
             logging.info(f"Paywall: download with Cloudflare Browser Rendering")
@@ -167,6 +192,10 @@ def collect_articles():
         cursor = con.cursor()
         for feed_url in FEEDS:
             logging.info(f"Processing feed: {feed_url}")
+
+            # Reset failure counter and backoff state for a new feed URL
+            consecutive_failures = 0
+
             try:
                 feed = feedparser.parse(feed_url)
 
@@ -198,8 +227,8 @@ def collect_articles():
                         logging.warning(f"Could not parse date for article: {entry.title}. Skipping.")
                         continue
 
-                    # 3. Fetch full text and top image
-                    full_text, image = fetch_article(url)
+                    # 3. Fetch full text and top image with retry mechanism
+                    full_text, image = fetch_article_with_retry(url, consecutive_failures)
                     len_full_text = len(full_text)
                     if not full_text or len_full_text < 300: # Skip short/empty articles
                         logging.warning(f"Article too short: {entry.title} with {len_full_text} characters. Skipping")
