@@ -98,7 +98,7 @@ def extract_text_from_html(html: str, url: str) -> Optional[Dict[str, Any]]:
                 "text": text,
                 "image": image,
             }
-        logging.warning("Extract retry: less than {min_chars} characters returned the first time")
+        logging.warning(f"Extract retry: less than {min_chars} characters returned the first time")
 
     return None
 

@@ -210,7 +210,7 @@ def collect_articles():
                         crawl_delay = get_crawl_delay(url, "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
                         robotstxt_parsed = True
                         if crawl_delay:
-                            logging.info(f"crawl_delay {delay} seconds found.")
+                            logging.info(f"crawl_delay {crawl_delay} seconds found.")
 
                     base = baseline if crawl_delay is None else max(baseline, float(crawl_delay))
                     lo = max(min_delay, base * (1.0 - jitter))
