@@ -16,12 +16,13 @@ from email.mime.text import MIMEText
 from email.utils import parsedate_to_datetime
 from collections import defaultdict
 from urllib.parse import urlparse
+from get_article import get_article_with_browser, get_article_with_get
+from parse_robotstxt import get_crawl_delay
 
 import feedparser
 import numpy as np
 import hdbscan
 from sklearn.preprocessing import normalize
-from newspaper import Article
 from openai import OpenAI
 from dotenv import load_dotenv
 from embeddings_utils import embed_article
@@ -51,29 +52,37 @@ CONTINUING_STORY_THRESHOLD = 0.80
 # Number of days to keep old articles and briefings in the database.
 DB_RETENTION_DAYS = 7
 
-# Build paywall map {registered_domain : scraper-callable}
-paywall_map = {}
-for item in os.getenv("PAYWALL_MAP", "").split(","):
-    item = item.strip()
-    if not item:
-        continue
-    domain, target = item.split("=")
-    module, func   = target.split(":")
-    paywall_map[domain] = getattr(importlib.import_module(module), func)
-
 # --- HELPER FUNCTIONS (from your script) ---
+def needs_browser(url: str) -> bool:
+    norm = lambda s: (s or "").lower().lstrip("*.").removeprefix("www.")
+    host = norm(urlparse(url).hostname)
+    doms = {norm(d) for d in os.getenv("BROWSER_DOMAINS", "").replace(",", " ").split() if d}
+    return any(host == d or host.endswith("." + d) for d in doms)
+
 def fetch_article(url: str) -> tuple[str, str]:
-    """Downloads and parses an article, returning its text."""
     try:
-        art = Article(url)
-        domain = urlparse(url).netloc
-        # pay-wall scraper present?
-        if domain in paywall_map:
-            art.set_html(paywall_map[domain](url))
+        env = {
+            "CLOUDFLARE_ACCOUNT_ID": os.environ["CF_ACCOUNT_ID"],
+            "CLOUDFLARE_API_TOKEN": os.environ["CF_API_TOKEN"],
+        }
+
+        timeout = 60
+
+        # pay-wall?
+        if needs_browser(url):
+            logging.info(f"Paywall: download with Cloudflare Browser Rendering")
+            text, title, image = get_article_with_browser(env, url, timeout)
         else:
-            art.download()
-        art.parse()
-        return art.text or art.title, art.top_image
+            # 1) Try GET download + extract
+            logging.info(f"Try GET download")
+            text, title, image = get_article_with_get(url, timeout)
+            if not text:
+                # 2) Fallback: Cloudflare Browser Rendering + extract
+                time.sleep(random.uniform(1.0, 3.0))
+                logging.warning(f"Fallback to Cloudflare Browser Rendering")
+                text, title, image = get_article_with_browser(env, url, timeout)
+
+        return text or title, image
     except Exception as e:
         logging.warning(f"Could not download or parse article at {url}: {e}")
         return "", ""
@@ -161,6 +170,13 @@ def collect_articles():
             try:
                 feed = feedparser.parse(feed_url)
 
+                robotstxt_parsed = False
+                crawl_delay: Optional[float] = None
+                baseline: float = 2.5       # default when no crawl-delay
+                jitter: float = 0.40        # ±40% jitter
+                min_delay: float = 1.0      # absolute floor
+                max_delay: float = 600.0    # absolute ceiling
+
                 # Get the main title of the feed to use as the source name
                 source_name = feed.feed.get('title', 'Unknown Source')
                 for entry in feed.entries:
@@ -186,11 +202,22 @@ def collect_articles():
                     full_text, image = fetch_article(url)
                     len_full_text = len(full_text)
                     if not full_text or len_full_text < 300: # Skip short/empty articles
-                        logging.info(f"Article too short: {entry.title} with {len_full_text} characters. Skipping")
+                        logging.warning(f"Article too short: {entry.title} with {len_full_text} characters. Skipping")
                         continue
 
                     # Be a good web citizen
-                    time.sleep(random.uniform(2.0, 5.0))
+                    if not robotstxt_parsed:
+                        crawl_delay = get_crawl_delay(url, "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+                        robotstxt_parsed = True
+                        if crawl_delay:
+                            logging.info(f"crawl_delay {delay} seconds found.")
+
+                    base = baseline if crawl_delay is None else max(baseline, float(crawl_delay))
+                    lo = max(min_delay, base * (1.0 - jitter))
+                    hi = min(max_delay, base * (1.0 + jitter))
+                    delay = random.uniform(lo, hi)
+                    logging.info(f"Sleeping {round(delay, 1)} seconds...")
+                    time.sleep(delay)
 
                     # 4. Generate token-aware chunked, nomalized embedding
                     try:
@@ -374,7 +401,7 @@ def cluster_and_summarize():
                     response_format={"type": "json_object"}  # Enforce strict JSON output
                 )
                 data = json.loads(response.choices[0].message.content)
-                summary_title = data.get("title", "Untitled Briefing") + (" (Update)" if previous_summary else "")
+                summary_title = data.get("title", "Untitled Briefing")
                 summary_content = data.get("summary", "No summary available.")
                 importance_score = data.get("importance", 5)
 
