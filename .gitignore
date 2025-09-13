@@ -1,5 +1,3 @@
-login*.*
-parse*.*
 paywall*.*
 *.py_
 *.db
