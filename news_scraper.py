@@ -92,7 +92,6 @@ def fetch_article(url: str) -> tuple[str, str]:
 
         timeout = 60
 
-        logging.info(f"Fetching {url}")
         # pay-wall?
         if needs_browser(url):
             logging.info(f"Paywall: download with Cloudflare Browser Rendering")
