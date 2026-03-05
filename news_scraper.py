@@ -27,6 +27,24 @@ from openai import OpenAI
 from dotenv import load_dotenv
 from embeddings_utils import embed_article
 
+####
+import shutil
+from datetime import datetime
+
+def copy_database_for_experiment():
+    """Create a timestamped copy of the database for experimentation"""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup_path = f"{DB_PATH}.experiment_{timestamp}.sqlite3"
+
+    try:
+        shutil.copy2(DB_PATH, backup_path)
+        logging.info(f"Created database copy for experiment: {backup_path}")
+        return backup_path
+    except Exception as e:
+        logging.error(f"Failed to copy database: {e}")
+        return None
+####
+
 # --- INITIALIZATION ---
 load_dotenv()  # Optional .env support
 client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
@@ -318,8 +336,8 @@ def cluster_and_summarize():
 
         # 1. Perform a loose, initial clustering to discover potential topics.
         initial_clusters = hdbscan.HDBSCAN(
-            min_cluster_size=5,
-            min_samples=3,
+            min_cluster_size=7,
+            min_samples=5,
             metric="euclidean",
             cluster_selection_method="leaf",
         ).fit_predict(normalized_embeddings)
@@ -561,6 +579,10 @@ def main():
     init_db()
     cleanup_database()
     collect_articles()
+
+    # Create database copy for experimentation
+    experiment_db = copy_database_for_experiment()
+
     cluster_and_summarize()
     digest_html, briefing_ids = build_digest()
     if digest_html:
