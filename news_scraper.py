@@ -62,7 +62,7 @@ READ_LIMIT_WORDS = 3000
 
 # This is the new key parameter for the centroid pipeline.
 # Only articles with a cosine similarity > this value to a topic's center will be included.
-SIMILARITY_THRESHOLD = 0.85
+SIMILARITY_THRESHOLD = 0.80
 
 # Threshold to consider a new cluster an update to an old one
 CONTINUING_STORY_THRESHOLD = 0.80
@@ -336,10 +336,11 @@ def cluster_and_summarize():
 
         # 1. Perform a loose, initial clustering to discover potential topics.
         initial_clusters = hdbscan.HDBSCAN(
-            min_cluster_size=7,
-            min_samples=5,
+            min_cluster_size=4,
+            min_samples=2,
             metric="euclidean",
-            cluster_selection_method="leaf",
+            cluster_selection_method="eom",
+            cluster_selection_epsilon=0.80,
         ).fit_predict(normalized_embeddings)
         logging.info(f"Found {len(set(initial_clusters)) - 1} initial topic groups.")
 
@@ -432,21 +433,33 @@ def cluster_and_summarize():
                         "Return a JSON object with 'title', 'summary', and 'importance'."
                     )
 
-                response = client.chat.completions.create(
-                    model="gpt-4o",
-                    seed=42,               # Ensures reproducible results for identical inputs
-                    messages=[
+                response = client.responses.create(
+                    model="gpt-5",
+                    input=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt}
                     ],
-                    temperature=0,         # Deterministic, no creative drift
-                    max_tokens=800,        # Enough for detailed summary without overflow
-                    top_p=1,               # Keep selection deterministic with temp=0
-                    frequency_penalty=0,   # Allow repetition if factual
-                    presence_penalty=0,     # Avoid pushing new, non-factual content
-                    response_format={"type": "json_object"}  # Enforce strict JSON output
+                    text={
+                        "format": {
+                            "type": "json_schema",
+                            "name": "briefing",
+                            "schema": {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "properties": {
+                                    "title": {"type": "string"},
+                                    "summary": {"type": "string"},
+                                    "importance": {"type": "integer"}
+                                },
+                                "required": ["title", "summary", "importance"]
+                            },
+                            "strict": True
+                        }
+                    },
+                    reasoning={"effort": "minimal"},
+                    max_output_tokens=3000,
                 )
-                data = json.loads(response.choices[0].message.content)
+                data = json.loads(response.output_text)
                 summary_title = data.get("title", "Untitled Briefing")
                 summary_content = data.get("summary", "No summary available.")
                 importance_score = data.get("importance", 5)
