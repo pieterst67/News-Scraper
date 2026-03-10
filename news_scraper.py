@@ -434,7 +434,7 @@ def cluster_and_summarize():
                     )
 
                 response = client.responses.create(
-                    model="gpt-5",
+                    model="gpt-5.2",
                     input=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt}
@@ -456,8 +456,8 @@ def cluster_and_summarize():
                             "strict": True
                         }
                     },
-                    reasoning={"effort": "minimal"},
-                    max_output_tokens=3000,
+                    reasoning={"effort": "none"},
+                    max_output_tokens=800,
                 )
                 data = json.loads(response.output_text)
                 summary_title = data.get("title", "Untitled Briefing")
