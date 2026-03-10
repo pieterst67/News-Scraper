@@ -453,11 +453,11 @@ def cluster_and_summarize():
                                 },
                                 "required": ["title", "summary", "importance"]
                             },
-                            "strict": True
+                            "strict": True,
+                            "verbosity": "low",
                         }
                     },
-                    reasoning={"effort": "none"},
-                    max_output_tokens=800,
+                    reasoning={"effort": "medium"},
                 )
                 data = json.loads(response.output_text)
                 summary_title = data.get("title", "Untitled Briefing")
@@ -530,7 +530,13 @@ def build_digest() -> str:
     if not digest_parts: return "", []
 
     html_body = (
-        "<html><body style=\"margin:0; padding:0;\">"
+        "<!DOCTYPE html>"
+        "<html lang=\"nl\">"
+        "<head>"
+        "<meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+        "</head>"
+        "<body style=\"margin:0; padding:0;\">"
         "<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" border=\"0\">"
         "<tr>"
         "<td style=\"padding:16px; font-size:16px; line-height:1.5;\">"
@@ -599,8 +605,11 @@ def main():
     cluster_and_summarize()
     digest_html, briefing_ids = build_digest()
     if digest_html:
-        # For debugging, you can print the HTML
-#        print(digest_html)
+#        timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+#        filename = f"digest_{timestamp}.html"
+#        with open(filename, "w", encoding="utf-8") as f:
+#            f.write(digest_html)
+
         send_mail(digest_html)
         mark_briefings_as_sent(briefing_ids)
     else:
