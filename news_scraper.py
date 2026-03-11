@@ -57,8 +57,8 @@ DB_PATH = os.environ.get("DB_PATH", "news.db") # Use env var or default to local
 # Load FEEDS from environment variables
 FEEDS = [u for u in os.getenv("FEEDS", "").splitlines() if u]
 
-# Mmax words per digest (~200 wpm × 15 min = 3000)
-READ_LIMIT_WORDS = 3000
+# Max words per digest (~200 wpm × 10 min = 2000)
+READ_LIMIT_WORDS = 2000
 
 # This is the new key parameter for the centroid pipeline.
 # Only articles with a cosine similarity > this value to a topic's center will be included.
@@ -410,18 +410,21 @@ def cluster_and_summarize():
             try:
                 system_prompt = (
                     "You are a world-class news analyst. Your task is to synthesize news articles into a sharp, concise briefing. "
+                    "Make sure that the output is no longer than 200 words. "
+                    "The title should reflect the content of the summary with a newspaper like style, take the New York Times as an example. "
                     "Output MUST be entirely in correct Dutch. After composing, check if the text is fully in Dutch; "
                     "if not, rewrite it entirely in correct Dutch. "
                     "Maintain a neutral, objective, fact-based tone similar to ANP or Reuters. "
                     "Do not include opinions, conclusions, observations, speculation, or value judgments. "
                     "Respond ONLY with a valid JSON object, using exactly these keys: "
-                    "'title' (string), 'summary' (string), 'importance' (integer from 1 = minor news to 10 = major global event). "
+                    "'title' (string), 'summary' (string), 'importance' (integer from 1 = minor local news to 10 = major global event). "
                     "Do not add any extra commentary before or after the JSON object."
                 )
 
                 if previous_summary:
                     user_prompt = (
                         "Update the briefing for a developing story, focusing only on new developments compared to yesterday.\n\n"
+                        "Produce a fitting title that informs the reader that it is a continuing story but don't add \"developing story\" or similar.\n\n"
                         f"YESTERDAY'S SUMMARY:\n{previous_summary}\n\n"
                         f"TODAY'S NEW ARTICLES:\n{combined_text[:90000]}\n\n"
                         "Produce an updated JSON object with 'title', 'summary', and 'importance'."
@@ -608,7 +611,7 @@ def main():
 #        timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
 #        filename = f"digest_{timestamp}.html"
 #        with open(filename, "w", encoding="utf-8") as f:
-#            f.write(digest_html)
+#           f.write(digest_html)
 
         send_mail(digest_html)
         mark_briefings_as_sent(briefing_ids)
