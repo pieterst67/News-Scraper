@@ -79,7 +79,7 @@ def needs_browser(url: str) -> bool:
 
 def fetch_article_with_retry(url: str, consecutive_failures: int) -> tuple[str, str]:
     max_retries = 5
-    backoff_base = 30  # Initial backoff delay in seconds
+    backoff_base = 5  # Initial backoff delay in seconds
 
     for attempt in range(max_retries):
         text, image = fetch_article(url)
@@ -88,10 +88,10 @@ def fetch_article_with_retry(url: str, consecutive_failures: int) -> tuple[str, 
 
         consecutive_failures += 1
 
-        # Compute wait time with full jitter, cap at 15 minutes
-        backoff_delay = min(random.uniform(0, backoff_base * (2 ** attempt)), 900)
+        # Compute wait time with full jitter, cap at 60 seconds 
+        backoff_delay = min(random.uniform(0, backoff_base * (2 ** attempt)), 60)
         if consecutive_failures >= 3:
-            cooloff = random.uniform(300, 600)
+            cooloff = random.uniform(30, 60)
             backoff_delay = max(backoff_delay, cooloff)
             logging.warning(f"Cooling off for {round(backoff_delay, 1)} seconds...")
         else:
@@ -247,7 +247,8 @@ def collect_articles():
                     # 3. Fetch full text and top image with retry mechanism
                     full_text, image = fetch_article_with_retry(url, consecutive_failures)
                     len_full_text = len(full_text)
-                    if not full_text or len_full_text < 300: # Skip short/empty articles
+                    if not full_text or len_full_text < 500: # Skip short/empty articles
+                        consecutive_failures = 0  # Content-type failure, reset counter
                         logging.warning(f"Article too short: {entry.title} with {len_full_text} characters. Skipping")
                         continue
 
@@ -603,7 +604,7 @@ def main():
     collect_articles()
 
     # Create database copy for experimentation
-    experiment_db = copy_database_for_experiment()
+#    experiment_db = copy_database_for_experiment()
 
     cluster_and_summarize()
     digest_html, briefing_ids = build_digest()
