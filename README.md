@@ -25,3 +25,6 @@ list of RSS/Atom URLs
 
 `READ_LIMIT_WORDS`\
 max words per digest (~200 wpm × 15 min = 3000)
+
+`SUMMARY_MODEL`\
+OpenAI model used for generating the cluster briefings (default `gpt-5.6-luna`)

@@ -54,6 +54,9 @@ locale.setlocale(locale.LC_TIME, "nl_NL.UTF-8")
 # --- CONFIGURATION ---
 DB_PATH = os.environ.get("DB_PATH", "news.db") # Use env var or default to local file
 
+# Model used for generating the Dutch briefings
+SUMMARY_MODEL = os.environ.get("SUMMARY_MODEL", "gpt-5.6-luna")
+
 # Load FEEDS from environment variables
 FEEDS = [u for u in os.getenv("FEEDS", "").splitlines() if u]
 
@@ -438,7 +441,7 @@ def cluster_and_summarize():
                     )
 
                 response = client.responses.create(
-                    model="gpt-5.2",
+                    model=SUMMARY_MODEL,
                     input=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt}
