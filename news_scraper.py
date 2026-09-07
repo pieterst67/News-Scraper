@@ -487,6 +487,122 @@ def cluster_and_summarize():
     logging.info("Clustering and summarization finished.")
 
 
+def _redact_digest(briefings: list[tuple]) -> dict | None:
+    """Perform a redaction pass over the selected briefings.
+
+    Sends all selected briefings (title + summary, with identifying ID) to
+    the LLM for newspaper-level polish, then validates the response.
+
+    Returns:
+        dict mapping id -> {"title": ..., "summary": ...} on success,
+        None on failure (caller falls back to originals).
+    """
+    if len(briefings) < 2:
+        return None
+
+    items_input = []
+    for bid, title, summary in briefings:
+        items_input.append(f"ID: {bid}\nTitle: {title}\nSummary: {summary}")
+
+    input_text = "\n\n".join(items_input)
+
+    system_prompt = (
+        "You are a newspaper editor. Your task is to rewrite a set of Dutch "
+        "news briefings so they flow naturally as a cohesive digest. Eliminate "
+        "repeated wording across items, smooth transitions, vary sentence rhythm, "
+        "and give the set a consistent editorial voice. Rewrite titles and "
+        "summaries freely for newspaper-level polish.\n\n"
+        "Rules:\n"
+        "- Output must stay entirely in Dutch.\n"
+        "- Maintain a neutral, fact-based tone (ANP/Reuters-like).\n"
+        "- No opinions, conclusions, speculation, or value judgments.\n"
+        "- Do not add, change, or remove any facts relative to the input.\n"
+        "- Keep each summary roughly the same length as received (do not expand).\n"
+        "- Item order in the output must match the input order.\n\n"
+        "Respond ONLY with a valid JSON object using exactly this schema:\n"
+        "{'redacted': [{'id': <integer>, 'title': <string>, 'summary': <string>}, ...]}\n"
+        "The 'id' values must match exactly the IDs in the input."
+    )
+
+    try:
+        response = client.responses.create(
+            model=SUMMARY_MODEL,
+            input=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": input_text},
+            ],
+            text={
+                "format": {
+                    "type": "json_schema",
+                    "name": "redacted_briefings",
+                    "schema": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": {
+                            "redacted": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "additionalProperties": False,
+                                    "properties": {
+                                        "id": {"type": "integer"},
+                                        "title": {"type": "string"},
+                                        "summary": {"type": "string"},
+                                    },
+                                    "required": ["id", "title", "summary"],
+                                },
+                            }
+                        },
+                        "required": ["redacted"],
+                    },
+                    "strict": True,
+                    "verbosity": "low",
+                }
+            },
+            reasoning={"effort": "medium"},
+        )
+        data = json.loads(response.output_text)
+        redacted = data.get("redacted", [])
+
+        if len(redacted) != len(briefings):
+            logging.error(
+                "Redaction response item count mismatch: expected %d, got %d",
+                len(briefings),
+                len(redacted),
+            )
+            return None
+
+        result = {}
+        seen_ids = set()
+        for item in redacted:
+            bid = item.get("id")
+            title = item.get("title", "")
+            summary = item.get("summary", "")
+            if not title or not summary:
+                logging.error("Redaction returned empty title or summary for id %s", bid)
+                return None
+            if bid in seen_ids:
+                logging.error("Redaction contained duplicate id %s", bid)
+                return None
+            seen_ids.add(bid)
+            result[bid] = {"title": title, "summary": summary}
+
+        expected_ids = {bid for bid, _, _ in briefings}
+        if seen_ids != expected_ids:
+            logging.error(
+                "Redaction returned ids that do not map back exactly to the input: missing %s, unexpected %s",
+                sorted(expected_ids - seen_ids),
+                sorted(seen_ids - expected_ids),
+            )
+            return None
+
+        return result
+
+    except Exception as e:
+        logging.warning("Redaction pass failed: %s", e)
+        return None
+
+
 def build_digest() -> str:
     """Builds an HTML digest from the latest generated briefings."""
     logging.info("Building HTML digest...")
@@ -500,13 +616,39 @@ def build_digest() -> str:
         logging.info("No new briefings to build a digest.")
         return "", []
 
-    briefing_ids = [row[0] for row in rows]
-    digest_parts, words = [], 0
+    # --- Select briefings (apply word-count cap) ---
+    selected_rows, words = [], 0
     for row in rows:
-        _, title, content, image, sources_str = row
+        _, title, content, _, _ = row
         word_count = len(content.split())
         if words + word_count > READ_LIMIT_WORDS:
             break
+        selected_rows.append(row)
+        words += word_count
+
+    if not selected_rows:
+        return "", []
+
+    briefing_ids = [row[0] for row in selected_rows]
+
+    # --- Redaction pass over the selected set ---
+    redacted_briefings = None
+    if len(selected_rows) >= 2:
+        briefings_for_redact = [(r[0], r[1], r[2]) for r in selected_rows]
+        redacted_briefings = _redact_digest(briefings_for_redact)
+        if redacted_briefings is not None:
+            logging.info("Redaction pass succeeded (%d items).", len(redacted_briefings))
+        else:
+            logging.warning("Redaction pass failed or returned invalid data; using original titles/summaries.")
+
+    digest_parts = []
+    for row in selected_rows:
+        bid, title, content, image, sources_str = row
+
+        # Use redacted text if available, otherwise fall back to original
+        if redacted_briefings is not None and bid in redacted_briefings:
+            r = redacted_briefings[bid]
+            title, content = r["title"], r["summary"]
 
         e_title = html.escape(title)
         e_image = html.escape(image)
@@ -532,7 +674,6 @@ def build_digest() -> str:
         block.append("<br>")
 
         digest_parts.append("\n".join(block))
-        words += word_count
 
     if not digest_parts: return "", []
 
