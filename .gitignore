@@ -1,7 +1,7 @@
 paywall*.*
 *.py_
 *.db
-docs/plans/current.md
+docs/plans/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
